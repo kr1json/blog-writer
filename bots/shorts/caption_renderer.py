@@ -20,6 +20,105 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.parent.parent
 
+CAPTION_TEMPLATES = {
+    'hormozi': {
+        'font_size': 64,
+        'highlight_color': '#FFD700',
+        'animation': 'pop_in',
+        'position': 'center',
+        'outline_width': 4,
+        'auto_emoji': False,
+    },
+    'tiktok_viral': {
+        'font_size': 56,
+        'highlight_color': '#FF6B6B',
+        'animation': 'bounce',
+        'auto_emoji': True,
+        'position': 'center_bottom',
+    },
+    'brand_4thpath': {
+        'font_size': 52,
+        'highlight_color': '#00D4FF',
+        'animation': 'typewriter',
+        'position': 'center',
+        'overlay_gradient': True,
+    },
+}
+
+# Corner → caption template mapping
+CORNER_CAPTION_MAP = {
+    '쉬운세상': 'hormozi',
+    '숨은보물': 'tiktok_viral',
+    '바이브리포트': 'hormozi',
+    '팩트체크': 'brand_4thpath',
+    '한컷': 'tiktok_viral',
+    '웹소설': 'brand_4thpath',
+}
+
+
+def smart_line_break(text: str, max_chars: int = 18) -> list[str]:
+    """
+    Break Korean text at semantic boundaries, not mid-word.
+    Never break before 조사 (particles) or 어미 (endings).
+
+    Returns list of line strings.
+    """
+    # Common Korean particles/endings that should not start a new line
+    PARTICLES = ['은', '는', '이', '가', '을', '를', '의', '에', '에서', '으로', '로',
+                 '과', '와', '도', '만', '까지', '부터', '보다', '처럼', '같이',
+                 '한테', '에게', '이라', '라고', '이고', '이며', '고', '며', '면',
+                 '이면', '이나', '나', '든지', '거나', '지만', '이지만', '지만',
+                 '니까', '으니까', '이니까', '서', '아서', '어서', '며', '고']
+
+    if len(text) <= max_chars:
+        return [text] if text else []
+
+    lines = []
+    remaining = text
+
+    while len(remaining) > max_chars:
+        # Find best break point near max_chars
+        break_at = max_chars
+
+        # Look for space or punctuation near the limit
+        for i in range(max_chars, max(0, max_chars - 6), -1):
+            if i >= len(remaining):
+                continue
+            char = remaining[i]
+            prev_char = remaining[i-1] if i > 0 else ''
+            next_char = remaining[i+1] if i+1 < len(remaining) else ''
+
+            # Break at space
+            if char == ' ':
+                # Check if next word starts with a particle
+                next_word = remaining[i+1:i+4]
+                is_particle_start = any(next_word.startswith(p) for p in PARTICLES)
+                if not is_particle_start:
+                    break_at = i
+                    break
+
+            # Break after punctuation
+            if prev_char in ('。', '，', ',', '.', '!', '?', '~'):
+                break_at = i
+                break
+
+        lines.append(remaining[:break_at].strip())
+        remaining = remaining[break_at:].strip()
+
+    if remaining:
+        lines.append(remaining)
+
+    return [l for l in lines if l]
+
+
+def get_template_for_corner(corner: str) -> dict:
+    """
+    Get caption template config for a given content corner.
+    Falls back to 'hormozi' template if corner not in map.
+    """
+    template_name = CORNER_CAPTION_MAP.get(corner, 'hormozi')
+    return CAPTION_TEMPLATES.get(template_name, CAPTION_TEMPLATES['hormozi'])
+
 
 def _load_config() -> dict:
     cfg_path = BASE_DIR / 'config' / 'shorts_config.json'
@@ -200,6 +299,7 @@ def render_captions(
     timestamp: str,
     wav_duration: float = 0.0,
     cfg: Optional[dict] = None,
+    corner: str = '',
 ) -> Path:
     """
     스크립트 + 단어별 타임스탬프 → ASS 자막 파일 생성.
@@ -211,6 +311,7 @@ def render_captions(
         timestamp:    파일명 prefix
         wav_duration: TTS 오디오 총 길이 (균등 분할 폴백용)
         cfg:          shorts_config.json dict
+        corner:       content corner name (e.g. '쉬운세상') for template selection
 
     Returns:
         ass_path
@@ -222,6 +323,20 @@ def render_captions(
     ass_path = output_dir / f'{timestamp}.ass'
 
     cap_cfg = cfg.get('caption', {})
+
+    # Apply corner-specific template overrides if corner is provided
+    if corner:
+        template = get_template_for_corner(corner)
+        # Override cfg caption section with template values
+        cap_cfg = dict(cap_cfg)  # make a shallow copy to avoid mutating original
+        if 'font_size' in template:
+            cap_cfg['font_size'] = template['font_size']
+        if 'highlight_color' in template:
+            cap_cfg['highlight_color'] = template['highlight_color']
+        if 'outline_width' in template:
+            cap_cfg['outline_width'] = template['outline_width']
+        logger.info(f'[캡션] 코너 "{corner}" → 템플릿 적용: {template}')
+
     max_chars = cap_cfg.get('max_chars_per_line_ko', 18)
     highlight_color = cap_cfg.get('highlight_color', '#FFD700')
     default_color = cap_cfg.get('default_color', '#FFFFFF')
@@ -235,8 +350,10 @@ def render_captions(
             wav_duration = 20.0
         timestamps = _build_uniform_timestamps(script, wav_duration)
 
-    # ASS 헤더
-    header = _ass_header(cfg)
+    # ASS 헤더 (rebuild cfg with updated cap_cfg so header reflects template overrides)
+    effective_cfg = dict(cfg)
+    effective_cfg['caption'] = cap_cfg
+    header = _ass_header(effective_cfg)
     events = []
 
     # 훅 이벤트 (첫 1.5초 중앙 표시)
