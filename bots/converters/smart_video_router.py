@@ -29,7 +29,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-load_dotenv(dotenv_path='D:/key/blog-writer.env.env')
+load_dotenv()  # load .env from current directory or parents
 
 BASE_DIR = Path(__file__).parent.parent.parent
 LOG_DIR = BASE_DIR / 'logs'
@@ -76,6 +76,7 @@ class SmartVideoRouter:
         self.fallback_engine: str = router_cfg.get('fallback', 'ffmpeg_slides')
 
         self.engine_opts: dict = opts  # all engine option blocks
+        self._cfg: dict = video_cfg      # full video_generation config block
         self.state: dict = self._get_state()
 
     # ── State management ────────────────────────────────────
@@ -113,9 +114,15 @@ class SmartVideoRouter:
 
     # ── Engine availability checks ───────────────────────────
 
-    def _has_api_key(self, engine_name: str) -> bool:
-        """Return True if the engine's API key env var is set and non-empty."""
-        cfg = self.engine_opts.get(engine_name, {})
+    def _has_api_key(self, engine_name_or_cfg) -> bool:
+        """Return True if the engine's API key env var is set and non-empty.
+
+        Accepts either an engine name string or a dict with 'api_key_env' key.
+        """
+        if isinstance(engine_name_or_cfg, dict):
+            cfg = engine_name_or_cfg
+        else:
+            cfg = self.engine_opts.get(engine_name_or_cfg, {})
         key_env = cfg.get('api_key_env', '')
         if not key_env:
             # ffmpeg_slides has no API key requirement
@@ -209,22 +216,30 @@ class SmartVideoRouter:
         return result
 
     def on_failure(self, engine: str, error: str) -> str:
-        """
-        Called when an engine fails mid-generation.
-        Returns next engine to try, or 'ffmpeg_slides' as final fallback.
-        """
-        logger.warning(f"엔진 실패 처리: {engine} — {error}")
+        """Called when engine fails. Returns next available engine."""
+        logger.warning(f"[영상] 엔진 실패: {engine} — {error}")
+
+        priority = self._cfg.get('options', {}).get('smart_router', {}).get(
+            'priority', ['kling_free', 'veo3', 'seedance2', 'ffmpeg_slides']
+        )
+
+        # Find next available engine after the failed one
         try:
-            idx = self.priority.index(engine)
-            next_engines = self.priority[idx + 1:]
+            idx = priority.index(engine)
+            candidates = priority[idx + 1:]
         except ValueError:
-            next_engines = []
+            candidates = priority
 
-        for candidate in next_engines:
-            logger.info(f"다음 엔진 시도: {candidate}")
-            return candidate
+        for candidate in candidates:
+            if candidate == 'ffmpeg_slides':
+                return 'ffmpeg_slides'  # always available
+            engine_opts = self._cfg.get('options', {}).get(candidate, {})
+            api_key_env = engine_opts.get('api_key_env', '')
+            if self._has_api_key({'api_key_env': api_key_env}):
+                logger.info(f"[영상] 다음 엔진으로 전환: {candidate}")
+                return candidate
 
-        logger.info("모든 엔진 소진 — ffmpeg_slides 최종 폴백")
+        logger.warning("[영상] 사용 가능한 엔진 없음 — ffmpeg_slides로 폴백")
         return 'ffmpeg_slides'
 
     # ── Engine implementations ────────────────────────────────
